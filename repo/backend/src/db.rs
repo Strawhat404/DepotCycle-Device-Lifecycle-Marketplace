@@ -13,9 +13,15 @@ pub async fn init_pool(database_url: &str) -> Result<SqlitePool, AppError> {
         }
     }
 
+    use sqlx::sqlite::SqliteConnectOptions;
+    use std::str::FromStr;
+    let opts = SqliteConnectOptions::from_str(database_url)
+        .map_err(|e| AppError { status: axum::http::StatusCode::INTERNAL_SERVER_ERROR, message: e.to_string() })?
+        .create_if_missing(true);
+
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
-        .connect(database_url)
+        .connect_with(opts)
         .await?;
     sqlx::query("PRAGMA foreign_keys = ON;").execute(&pool).await?;
     Ok(pool)
