@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Copy .env.example to .env if .env doesn't exist
+if [ ! -f .env ]; then
+  cp .env.example .env
+fi
+
 if command -v cargo >/dev/null 2>&1; then
   cargo test -p backend
   cargo test -p unit_tests
