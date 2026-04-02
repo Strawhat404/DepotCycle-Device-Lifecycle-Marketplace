@@ -1,0 +1,9 @@
+target/
+dist/
+.trunk/
+.env
+.env.*
+.git/
+.gitignore
+*.md
+.tmp/

@@ -1,0 +1,45 @@
+# Rust build artifacts
+repo/target/
+**/*.rs.bk
+*.pdb
+
+# Environment files
+repo/.env
+repo/.env.local
+repo/.env.*.local
+
+# SQLite database files
+*.db
+*.db-shm
+*.db-wal
+repo/data/
+
+# Upload directory
+repo/uploads/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Trunk (Leptos frontend build)
+repo/frontend/dist/
+repo/frontend/.trunk/
+
+# AI acceptance self-test audit documents
+delivery_acceptance_audit.md
+delivery_acceptance_audit_report.md
+delivery_acceptance_project_architecture_audit.md
+
+# Temp files
+.tmp/
+*.tmp
+
+# Trajectory and session internals
+trajectory.json

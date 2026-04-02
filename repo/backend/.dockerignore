@@ -1,0 +1,11 @@
+target/
+.env
+.env.*
+*.db
+*.db-shm
+*.db-wal
+uploads/
+.git/
+.gitignore
+*.md
+.tmp/
