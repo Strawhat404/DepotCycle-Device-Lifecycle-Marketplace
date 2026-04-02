@@ -19,6 +19,6 @@ else
   docker run --rm \
     -v "$(pwd):/work" \
     -w /work \
-    rust:1.77 \
+    rust:1.88 \
     bash -c 'cargo test -p backend && cargo test -p unit_tests && cargo test -p API_tests'
 fi
