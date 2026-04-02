@@ -560,17 +560,22 @@ fn App() -> impl IntoView {
                         }>"Clear history"</button>
                     </div>
                     <div class="pill-list">
-                        <For each=move || suggestions.get() key=|item| item.clone() children=move |item| view! {
-                            <button class="pill" on:click=move |_| search_query.set(item.clone())>{item}</button>
+                        <For each=move || suggestions.get() key=|item| item.clone() children=move |item| {
+                            let item_click = item.clone();
+                            view! {
+                                <button class="pill" on:click=move |_| search_query.set(item_click.clone())>{item.clone()}</button>
+                            }
                         } />
                     </div>
                     <div class="history-list">
-                        <For each=move || search_history.get() key=|item| item.id.clone() children=move |item| view! {
-                            <button class="history-item" on:click=move |_| search_query.set(item.query_text.clone())>
-                                <span>{item.query_text}</span>
+                        <For each=move || search_history.get() key=|item| item.id.clone() children=move |item| {
+                            let qt = item.query_text.clone();
+                            view! {
+                            <button class="history-item" on:click=move |_| search_query.set(qt.clone())>
+                                <span>{item.query_text.clone()}</span>
                                 <small>{item.created_at}</small>
                             </button>
-                        } />
+                        }} />
                     </div>
                     <div class="results">
                         <For each=move || listings.get() key=|item| item.id.clone() children=move |item| {
@@ -588,13 +593,15 @@ fn App() -> impl IntoView {
                                         <strong>{format_usd(item.price_cents)}</strong>
                                         <button on:click=move |_| refresh_detail(item_id.clone())>"View"</button>
                                         <button on:click=move |_| {
+                                            let fav = favorite_id.clone();
                                             spawn_local(async move {
-                                                let _ = post_empty(&format!("{API}/favorites/{favorite_id}")).await;
+                                                let _ = post_empty(&format!("{API}/favorites/{fav}")).await;
                                             });
                                         }>"Favorite"</button>
                                         <button class="primary" on:click=move |_| {
+                                            let bid = buy_id.clone();
                                             spawn_local(async move {
-                                                let _ = post_json::<OrderResponse>(&format!("{API}/orders"), serde_json::json!({"listing_id": buy_id, "quantity": 1})).await;
+                                                let _ = post_json::<OrderResponse>(&format!("{API}/orders"), serde_json::json!({"listing_id": bid, "quantity": 1})).await;
                                             });
                                         }>"Buy"</button>
                                     </div>
@@ -719,8 +726,9 @@ fn App() -> impl IntoView {
                                 <div class="action-row">
                                     <button on:click=move |_| {
                                         let documents = documents.clone();
+                                        let id_a = doc_id_a.clone();
                                         spawn_local(async move {
-                                            let _ = post_empty(&format!("{API}/inventory/documents/{doc_id_a}/approve")).await;
+                                            let _ = post_empty(&format!("{API}/inventory/documents/{id_a}/approve")).await;
                                             if let Ok(data) = get_json::<Vec<InventoryDocument>>(&format!("{API}/inventory/documents")).await {
                                                 documents.set(data);
                                             }
@@ -728,8 +736,9 @@ fn App() -> impl IntoView {
                                     }>"Approve"</button>
                                     <button on:click=move |_| {
                                         let documents = documents.clone();
+                                        let id_b = doc_id_b.clone();
                                         spawn_local(async move {
-                                            let _ = post_empty(&format!("{API}/inventory/documents/{doc_id_b}/execute")).await;
+                                            let _ = post_empty(&format!("{API}/inventory/documents/{id_b}/execute")).await;
                                             if let Ok(data) = get_json::<Vec<InventoryDocument>>(&format!("{API}/inventory/documents")).await {
                                                 documents.set(data);
                                             }
@@ -785,20 +794,25 @@ fn App() -> impl IntoView {
                         <For each=move || shipments.get() key=|item| item.id.clone() children=move |item| {
                             let shipment_id = item.id.clone();
                             let shipment_hist_id = item.id.clone();
+                            let sid1 = shipment_id.clone();
+                            let sid2 = shipment_id.clone();
+                            let sid3 = shipment_id.clone();
+                            let sid4 = shipment_id.clone();
                             view! {
                                 <div class="mini-card">
                                     <strong>{item.order_number.clone()}</strong>
                                     <small>{format!("{} | integration {}", item.status, if item.integration_enabled == 1 { "enabled" } else { "manual" })}</small>
                                     <div class="action-row">
-                                        <button on:click=move |_| transition_and_refresh(&format!("{API}/shipments/{shipment_id}/transition"), "packed", shipments.clone())>"Pack"</button>
-                                        <button on:click=move |_| transition_and_refresh(&format!("{API}/shipments/{shipment_id}/transition"), "shipped", shipments.clone())>"Ship"</button>
-                                        <button on:click=move |_| transition_and_refresh(&format!("{API}/shipments/{shipment_id}/transition"), "received", shipments.clone())>"Receive"</button>
-                                        <button on:click=move |_| transition_and_refresh(&format!("{API}/shipments/{shipment_id}/transition"), "completed", shipments.clone())>"Complete"</button>
+                                        <button on:click=move |_| transition_and_refresh(&format!("{API}/shipments/{sid1}/transition"), "packed", shipments.clone())>"Pack"</button>
+                                        <button on:click=move |_| transition_and_refresh(&format!("{API}/shipments/{sid2}/transition"), "shipped", shipments.clone())>"Ship"</button>
+                                        <button on:click=move |_| transition_and_refresh(&format!("{API}/shipments/{sid3}/transition"), "received", shipments.clone())>"Receive"</button>
+                                        <button on:click=move |_| transition_and_refresh(&format!("{API}/shipments/{sid4}/transition"), "completed", shipments.clone())>"Complete"</button>
                                     </div>
                                     <button on:click=move |_| {
                                         let shipment_history = shipment_history.clone();
+                                        let hist_id = shipment_hist_id.clone();
                                         spawn_local(async move {
-                                            if let Ok(data) = get_json::<Vec<TimelineEntry>>(&format!("{API}/shipments/{shipment_hist_id}/history")).await {
+                                            if let Ok(data) = get_json::<Vec<TimelineEntry>>(&format!("{API}/shipments/{hist_id}/history")).await {
                                                 shipment_history.set(data);
                                             }
                                         });
@@ -839,6 +853,7 @@ fn App() -> impl IntoView {
                             let case_id_b = item.id.clone();
                             let case_id_c = item.id.clone();
                             let case_id_hist = item.id.clone();
+                            let case_id_timeline = item.id.clone();
                             view! {
                                 <div class="mini-card">
                                     <strong>{format!("{} {}", item.case_type, item.status)}</strong>
@@ -860,8 +875,9 @@ fn App() -> impl IntoView {
                                     }>"Attach evidence"</button>
                                     <button on:click=move |_| {
                                         let case_history = case_history.clone();
+                                        let hist_id = case_id_timeline.clone();
                                         spawn_local(async move {
-                                            if let Ok(data) = get_json::<Vec<TimelineEntry>>(&format!("{API}/after-sales/cases/{case_id_hist}/history")).await {
+                                            if let Ok(data) = get_json::<Vec<TimelineEntry>>(&format!("{API}/after-sales/cases/{hist_id}/history")).await {
                                                 case_history.set(data);
                                             }
                                         });
@@ -907,8 +923,9 @@ fn App() -> impl IntoView {
                                     let flags = flags.clone();
                                     let next_enabled = !enabled;
                                     let rollout = flag_rollout.get().parse::<i64>().unwrap_or(item.rollout_percent);
+                                    let fid = flag_id.clone();
                                     spawn_local(async move {
-                                        let _ = put_json::<FeatureFlag>(&format!("{API}/admin/feature-flags/{flag_id}"), serde_json::json!({
+                                        let _ = put_json::<FeatureFlag>(&format!("{API}/admin/feature-flags/{fid}"), serde_json::json!({
                                             "enabled": next_enabled,
                                             "rollout_percent": rollout
                                         })).await;
