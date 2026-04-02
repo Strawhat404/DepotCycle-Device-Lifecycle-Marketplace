@@ -11,6 +11,7 @@ FROM rust:1.88
 WORKDIR /app
 ENV DATABASE_URL=sqlite:///data/depotcycle.db
 ENV UPLOAD_DIR=/app/uploads
+RUN mkdir -p /data /app/uploads
 COPY --from=builder /app/target/release/backend /usr/local/bin/backend
 EXPOSE 3000
 CMD ["backend"]
