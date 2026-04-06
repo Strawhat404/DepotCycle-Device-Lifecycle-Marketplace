@@ -12,7 +12,8 @@ Part 1 + Part 2 implementation for the offline-first DepotCycle marketplace. Thi
 Run the full stack with:
 
 ```bash
-docker compose up 
+cd repo
+docker compose up
 ```
 
 ## Service addresses
@@ -37,7 +38,13 @@ These are created automatically on first backend startup and can be changed via 
 
 ## Verification steps
 
-1. Start the stack with `docker compose up --build`.
+1. Enter the repo directory and start the stack:
+
+```bash
+cd repo
+docker compose up --build
+```
+
 2. Visit `http://localhost:8080` and confirm the shell loads.
 3. Request `GET /api/v1/health` and confirm a healthy JSON response.
 4. Log in with one of the seeded credentials in the Leptos UI.
@@ -46,6 +53,7 @@ These are created automatically on first backend startup and can be changed via 
 7. Run the unified test command:
 
 ```bash
+cd repo
 ./run_tests.sh
 ```
 
