@@ -6,6 +6,7 @@ RUN rustup target add wasm32-unknown-unknown
 # Download pre-built trunk binary instead of compiling from source (avoids OOM on lightningcss)
 RUN curl -sL https://github.com/trunk-rs/trunk/releases/download/v0.21.5/trunk-x86_64-unknown-linux-gnu.tar.gz | tar -xzC /usr/local/bin
 COPY Cargo.toml /app/Cargo.toml
+COPY Cargo.lock /app/Cargo.lock
 COPY backend /app/backend
 COPY frontend /app/frontend
 COPY unit_tests /app/unit_tests

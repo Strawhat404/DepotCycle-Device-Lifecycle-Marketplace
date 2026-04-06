@@ -1,6 +1,7 @@
 FROM rust:1.87 AS builder
 WORKDIR /app
 COPY Cargo.toml /app/Cargo.toml
+COPY Cargo.lock /app/Cargo.lock
 COPY backend /app/backend
 COPY frontend /app/frontend
 COPY unit_tests /app/unit_tests
