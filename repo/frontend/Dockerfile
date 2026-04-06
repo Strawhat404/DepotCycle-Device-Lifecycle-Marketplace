@@ -1,4 +1,4 @@
-FROM rust:1.88 AS builder
+FROM rust:1.87 AS builder
 ARG PUBLIC_API_BASE_URL=http://localhost:3000
 WORKDIR /app
 ENV PUBLIC_API_BASE_URL=${PUBLIC_API_BASE_URL}
