@@ -1,8 +1,8 @@
 use gloo_net::http::Request;
 use leptos::*;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize};
 use wasm_bindgen_futures::spawn_local;
-use web_sys::RequestCredentials;
+use web_sys::{Blob, File, FormData, RequestCredentials};
 
 const API: &str = "/api/v1";
 
@@ -215,6 +215,23 @@ struct TimelineEntry {
     changed_at: String,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct UploadSessionResponse {
+    session_id: String,
+    uploaded_chunks: i64,
+    total_chunks: i64,
+    status: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct UploadFinalizeResponse {
+    media_id: String,
+    mime_type: String,
+    sha256: String,
+    storage_path: String,
+    playback_token: String,
+}
+
 #[component]
 fn App() -> impl IntoView {
     let user = create_rw_signal::<Option<AuthUser>>(None);
@@ -273,6 +290,10 @@ fn App() -> impl IntoView {
     let case_type = create_rw_signal("return".to_string());
     let case_reason = create_rw_signal("Device condition mismatch".to_string());
     let evidence_media_id = create_rw_signal(String::new());
+
+    let upload_progress = create_rw_signal(String::new());
+    let upload_percent = create_rw_signal(0_i64);
+    let upload_in_progress = create_rw_signal(false);
 
     let flag_rollout = create_rw_signal("50".to_string());
     let taxonomy_name = create_rw_signal("Accessories".to_string());
@@ -852,8 +873,10 @@ fn App() -> impl IntoView {
                             let case_id_a = item.id.clone();
                             let case_id_b = item.id.clone();
                             let case_id_c = item.id.clone();
-                            let case_id_hist = item.id.clone();
+                            let case_id_attach = item.id.clone();
+                            let case_id_upload = item.id.clone();
                             let case_id_timeline = item.id.clone();
+                            let file_input = create_node_ref::<html::Input>();
                             view! {
                                 <div class="mini-card">
                                     <strong>{format!("{} {}", item.case_type, item.status)}</strong>
@@ -866,13 +889,46 @@ fn App() -> impl IntoView {
                                     </div>
                                     <button on:click=move |_| {
                                         let media_id = evidence_media_id.get();
-                                        let case_id_attach = case_id_hist.clone();
+                                        let case_id_attach = case_id_attach.clone();
                                         spawn_local(async move {
                                             if !media_id.is_empty() {
                                                 let _ = post_json_value(&format!("{API}/after-sales/cases/{case_id_attach}/evidence"), serde_json::json!({"media_id": media_id})).await;
                                             }
                                         });
                                     }>"Attach evidence"</button>
+                                    <input type="file" node_ref=file_input />
+                                    <button
+                                        disabled=move || upload_in_progress.get()
+                                        on:click=move |_| {
+                                        let case_id_upload = case_id_upload.clone();
+                                        let maybe_file = file_input
+                                            .get()
+                                            .and_then(|input| input.files())
+                                            .and_then(|files| files.get(0));
+                                        if let Some(file) = maybe_file {
+                                            let progress = upload_progress.clone();
+                                            let percent = upload_percent.clone();
+                                            let in_progress = upload_in_progress.clone();
+                                            spawn_local(async move {
+                                                in_progress.set(true);
+                                                progress.set("Starting chunked upload...".into());
+                                                percent.set(0);
+                                                match chunked_upload_and_attach(&case_id_upload, file, progress, percent).await {
+                                                    Ok(msg) => progress.set(msg),
+                                                    Err(e) => progress.set(format!("Upload failed: {e}")),
+                                                }
+                                                in_progress.set(false);
+                                            });
+                                        }
+                                    }>"Chunked upload + attach evidence"</button>
+                                    <Show when=move || !upload_progress.get().is_empty() fallback=|| ()>
+                                        <div class="upload-status">
+                                            <div class="progress-bar" style="width:100%;background:#333;height:8px;border-radius:4px;margin-top:4px;">
+                                                <div style=move || format!("width:{}%;background:#4caf50;height:8px;border-radius:4px;transition:width 0.2s", upload_percent.get())></div>
+                                            </div>
+                                            <small>{move || upload_progress.get()}</small>
+                                        </div>
+                                    </Show>
                                     <button on:click=move |_| {
                                         let case_history = case_history.clone();
                                         let hist_id = case_id_timeline.clone();
@@ -1149,6 +1205,106 @@ async fn put_json<T: DeserializeOwned>(url: &str, payload: serde_json::Value) ->
         return Err(response.text().await.unwrap_or_else(|_| "request failed".into()));
     }
     response.json::<T>().await.map_err(|e| e.to_string())
+}
+
+const CHUNK_SIZE: f64 = 1_048_576.0; // 1 MiB per chunk
+const MAX_RETRIES: u32 = 3;
+
+async fn chunked_upload_and_attach(
+    case_id: &str,
+    file: File,
+    progress: RwSignal<String>,
+    percent: RwSignal<i64>,
+) -> Result<String, String> {
+    let file_size = file.size();
+    let total_chunks = ((file_size / CHUNK_SIZE).ceil() as i64).max(1);
+    let file_name = file.name();
+    let mime_type = file.type_();
+    let mime_type = if mime_type.is_empty() { "application/octet-stream".to_string() } else { mime_type };
+
+    // Step 1: Start upload session
+    progress.set(format!("Creating upload session ({total_chunks} chunks)..."));
+    let session = post_json::<UploadSessionResponse>(
+        &format!("{API}/media/uploads/start"),
+        serde_json::json!({
+            "file_name": file_name,
+            "mime_type": mime_type,
+            "total_chunks": total_chunks,
+            "listing_id": null,
+            "expected_sha256": null
+        }),
+    )
+    .await?;
+    let session_id = session.session_id;
+
+    // Step 2: Upload chunks with progress and retry
+    for i in 0..total_chunks {
+        let start = i as f64 * CHUNK_SIZE;
+        let end = ((i as f64 + 1.0) * CHUNK_SIZE).min(file_size);
+        let blob: Blob = file.slice_with_f64_and_f64(start, end).map_err(|_| "failed to slice file".to_string())?;
+
+        let mut success = false;
+        for attempt in 1..=MAX_RETRIES {
+            progress.set(format!("Uploading chunk {}/{total_chunks} (attempt {attempt})...", i + 1));
+
+            let array_buffer = wasm_bindgen_futures::JsFuture::from(blob.array_buffer())
+                .await
+                .map_err(|_| "failed to read chunk".to_string())?;
+            let uint8_array = js_sys::Uint8Array::new(&array_buffer);
+            let chunk_bytes = uint8_array.to_vec();
+
+            let response = Request::put(&format!("{API}/media/uploads/{session_id}/chunks/{i}"))
+                .credentials(RequestCredentials::Include)
+                .header("Content-Type", "application/octet-stream")
+                .body(chunk_bytes)
+                .map_err(|e| e.to_string())?
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+
+            if response.ok() {
+                success = true;
+                let pct = ((i + 1) as f64 / total_chunks as f64 * 90.0) as i64;
+                percent.set(pct);
+                break;
+            }
+
+            if attempt == MAX_RETRIES {
+                let err_text = response.text().await.unwrap_or_else(|_| "upload failed".into());
+                return Err(format!("Chunk {} failed after {MAX_RETRIES} retries: {err_text}", i + 1));
+            }
+            // Brief delay before retry
+            gloo_timers::future::TimeoutFuture::new(500 * attempt).await;
+        }
+        if !success {
+            return Err(format!("Chunk {} failed", i + 1));
+        }
+    }
+
+    // Step 3: Finalize upload with checksum verification
+    progress.set("Finalizing upload & verifying checksum...".into());
+    percent.set(95);
+    let finalize = post_json::<UploadFinalizeResponse>(
+        &format!("{API}/media/uploads/{session_id}/finalize"),
+        serde_json::json!({ "expected_sha256": null }),
+    )
+    .await?;
+
+    // Step 4: Attach media to case
+    progress.set("Attaching evidence to case...".into());
+    post_json_value(
+        &format!("{API}/after-sales/cases/{case_id}/evidence"),
+        serde_json::json!({ "media_id": finalize.media_id }),
+    )
+    .await?;
+
+    percent.set(100);
+    Ok(format!(
+        "Upload complete. Media: {} | SHA-256: {} | Size: {:.1} KB",
+        finalize.media_id,
+        finalize.sha256,
+        file_size / 1024.0
+    ))
 }
 
 fn transition_and_refresh(url: &str, next_status: &str, signal: RwSignal<Vec<ShipmentRecord>>) {

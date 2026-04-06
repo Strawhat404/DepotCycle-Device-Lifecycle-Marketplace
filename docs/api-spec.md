@@ -22,7 +22,10 @@ Base path: `/api/v1`
 
 ## Admin Console Preparation
 
-All admin endpoints require an authenticated `Administrator` session.
+Admin authorization is endpoint-specific:
+- `Administrator` only: credentials/templates/announcements creation-media upload and announcement delivery.
+- `Administrator` or `Manager`: dashboard metrics, feature flags, cohort assignment/read.
+- `Administrator`, `Support Agent`, or `Manager`: ratings review and appeals.
 
 - `GET /admin/local-credentials`
 - `POST /admin/local-credentials`
@@ -37,10 +40,30 @@ All admin endpoints require an authenticated `Administrator` session.
 - `GET /admin/announcements`
 - `POST /admin/announcements`
   - Create in-app announcements only. No external push integration is used.
+- `POST /admin/announcements/:announcement_id/deliveries`
+  - Deliver an announcement to specific users, a cohort, or all users.
+- `GET /admin/announcements/:announcement_id/deliveries`
+  - Review delivery/read state per user.
+- `GET /admin/cohorts`
+- `POST /admin/cohorts`
+- `GET /admin/cohort-assignments`
+- `POST /admin/cohort-assignments`
+  - Manage local cohort assignment state for A/B operations.
 - `GET /admin/dashboard/metrics`
   - Aggregates counts from local event logs, users, announcements, templates, uploads, shipments, and flags.
 - `POST /admin/media/upload`
   - Multipart upload endpoint for photos/videos stored on local disk with MIME validation and SHA-256 fingerprinting.
+
+## After-sales and Announcements
+
+- `POST /after-sales/cases/:case_id/evidence/upload`
+  - Authenticated multipart evidence upload scoped to the caller's authorized after-sales case; media is attached automatically.
+- `POST /after-sales/cases/:case_id/evidence`
+  - Attach an existing media id to an authorized after-sales case.
+- `GET /announcements/inbox`
+  - Returns announcements delivered to the current authenticated user.
+- `POST /announcements/:announcement_id/read`
+  - Marks the caller's delivery for an announcement as read.
 
 ## Response conventions
 
@@ -53,4 +76,3 @@ All admin endpoints require an authenticated `Administrator` session.
   "error": "message"
 }
 ```
-

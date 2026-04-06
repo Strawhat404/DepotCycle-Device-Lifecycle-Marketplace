@@ -224,6 +224,60 @@ pub struct AnnouncementRecord {
     pub created_at: String,
 }
 
+#[derive(Deserialize)]
+pub struct CreateCohortRequest {
+    pub name: String,
+    pub description: Option<String>,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct CohortRecord {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Deserialize)]
+pub struct AssignCohortRequest {
+    pub cohort_id: String,
+    pub user_id: String,
+}
+
+#[derive(Deserialize)]
+pub struct ListCohortAssignmentsQuery {
+    pub cohort_id: Option<String>,
+    pub user_id: Option<String>,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct CohortAssignmentRecord {
+    pub id: String,
+    pub cohort_id: String,
+    pub user_id: String,
+    pub assigned_at: String,
+}
+
+#[derive(Deserialize)]
+pub struct CreateAnnouncementDeliveriesRequest {
+    pub user_ids: Option<Vec<String>>,
+    pub cohort_id: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct AnnouncementDeliveryBatchResponse {
+    pub announcement_id: String,
+    pub delivered_count: i64,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct AnnouncementDeliveryRecord {
+    pub announcement_id: String,
+    pub user_id: String,
+    pub delivered_at: String,
+    pub read_at: Option<String>,
+}
+
 #[derive(Serialize)]
 pub struct DashboardMetricsResponse {
     pub total_users: i64,
@@ -411,4 +465,83 @@ pub struct RatingReviewRecord {
     pub score: i64,
     pub comments: Option<String>,
     pub review_status: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct CreateListingRequest {
+    pub title: String,
+    pub description: Option<String>,
+    pub price_cents: i64,
+    pub campus_id: Option<String>,
+    pub taxonomy_node_id: Option<String>,
+    pub condition_id: Option<i64>,
+    pub currency: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct CreateRatingRequest {
+    pub listing_id: String,
+    pub score: i64,
+    pub comments: Option<String>,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct RatingRecord {
+    pub id: String,
+    pub listing_id: Option<String>,
+    pub user_id: Option<String>,
+    pub score: i64,
+    pub comments: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Deserialize)]
+pub struct CreateAppealTicketRequest {
+    pub listing_id: Option<String>,
+    pub shipment_order_id: Option<String>,
+    pub reason: String,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct AppealTicketRecord {
+    pub id: String,
+    pub ticket_no: String,
+    pub status: String,
+    pub reason: String,
+    pub resolution: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Deserialize)]
+pub struct CreateTaxonomyTagRequest {
+    pub name: String,
+    pub slug: String,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct TaxonomyTagRecord {
+    pub id: String,
+    pub name: String,
+    pub slug: String,
+}
+
+#[derive(Deserialize)]
+pub struct CreateTaxonomyKeywordRequest {
+    pub keyword: String,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct TaxonomyKeywordRecord {
+    pub id: String,
+    pub keyword: String,
+}
+
+#[derive(Deserialize)]
+pub struct AssociateTaxonomyTagRequest {
+    pub tag_id: String,
+}
+
+#[derive(Deserialize)]
+pub struct AssociateTaxonomyKeywordRequest {
+    pub keyword_id: String,
 }

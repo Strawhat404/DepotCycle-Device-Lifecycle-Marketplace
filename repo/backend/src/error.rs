@@ -4,6 +4,7 @@ use axum::{
     Json,
 };
 use serde::Serialize;
+use tracing::error;
 
 #[derive(Debug)]
 pub struct AppError {
@@ -57,36 +58,42 @@ impl IntoResponse for AppError {
 
 impl From<sqlx::Error> for AppError {
     fn from(err: sqlx::Error) -> Self {
-        Self::internal(format!("database error: {err}"))
+        error!(error = %err, "database operation failed");
+        Self::internal("internal server error")
     }
 }
 
 impl From<std::io::Error> for AppError {
     fn from(err: std::io::Error) -> Self {
-        Self::internal(format!("io error: {err}"))
+        error!(error = %err, "io operation failed");
+        Self::internal("internal server error")
     }
 }
 
 impl From<argon2::password_hash::Error> for AppError {
     fn from(err: argon2::password_hash::Error) -> Self {
-        Self::internal(format!("password error: {err}"))
+        error!(error = %err, "password operation failed");
+        Self::internal("internal server error")
     }
 }
 
 impl From<aes_gcm::Error> for AppError {
     fn from(_: aes_gcm::Error) -> Self {
-        Self::internal("encryption operation failed")
+        error!("encryption operation failed");
+        Self::internal("internal server error")
     }
 }
 
 impl From<sqlx::migrate::MigrateError> for AppError {
     fn from(err: sqlx::migrate::MigrateError) -> Self {
-        Self::internal(format!("migration error: {err}"))
+        error!(error = %err, "migration operation failed");
+        Self::internal("internal server error")
     }
 }
 
 impl From<http::Error> for AppError {
     fn from(err: http::Error) -> Self {
-        Self::internal(format!("http error: {err}"))
+        error!(error = %err, "http operation failed");
+        Self::internal("internal server error")
     }
 }

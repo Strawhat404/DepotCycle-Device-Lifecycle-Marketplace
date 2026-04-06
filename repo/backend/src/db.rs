@@ -369,7 +369,19 @@ pub fn lockout_until(minutes: i64) -> String {
 }
 
 pub async fn get_dashboard_count(pool: &SqlitePool, table: &str) -> Result<i64, AppError> {
-    let sql = format!("SELECT COUNT(*) as count FROM {table}");
-    let row = sqlx::query(&sql).fetch_one(pool).await?;
-    Ok(row.get::<i64, _>("count"))
+    let sql = match table {
+        "users"                 => "SELECT COUNT(*) FROM users",
+        "announcements"         => "SELECT COUNT(*) FROM announcements",
+        "templates"             => "SELECT COUNT(*) FROM templates",
+        "local_credentials"     => "SELECT COUNT(*) FROM local_credentials",
+        "companion_credentials" => "SELECT COUNT(*) FROM companion_credentials",
+        "listing_media"         => "SELECT COUNT(*) FROM listing_media",
+        "shipment_orders"       => "SELECT COUNT(*) FROM shipment_orders",
+        "feature_flags"         => "SELECT COUNT(*) FROM feature_flags",
+        "event_logs"            => "SELECT COUNT(*) FROM event_logs",
+        "orders"                => "SELECT COUNT(*) FROM orders",
+        _ => return Err(AppError::internal("unknown dashboard table")),
+    };
+    let count: i64 = sqlx::query_scalar(sql).fetch_one(pool).await?;
+    Ok(count)
 }

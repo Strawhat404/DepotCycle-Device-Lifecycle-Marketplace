@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::{HashMap, HashSet}, path::PathBuf};
 
 use axum::{
     body::Bytes,
@@ -138,7 +138,8 @@ pub async fn after_sales_history(
     Extension(current_user): Extension<Option<CurrentUser>>,
     Path(case_id): Path<String>,
 ) -> Result<Json<Vec<serde_json::Value>>, AppError> {
-    let _ = auth::require_user(current_user)?;
+    let current_user = auth::require_user(current_user)?;
+    ensure_after_sales_case_access(&state.pool, &current_user, &case_id).await?;
     let rows = sqlx::query(
         "SELECT from_status, to_status, changed_at FROM after_sales_status_history WHERE case_id = ? ORDER BY changed_at",
     )
@@ -154,9 +155,18 @@ pub async fn after_sales_history(
 
 pub async fn register(
     State(state): State<AppState>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
     Json(payload): Json<RegisterRequest>,
 ) -> Result<Json<AuthResponse>, AppError> {
     security::validate_password_policy(&payload.password)?;
+    if payload.role_name != "Shopper" {
+        let actor = auth::require_user(current_user)?;
+        if actor.role_name != "Administrator" {
+            return Err(AppError::forbidden(
+                "administrator access required to assign elevated roles",
+            ));
+        }
+    }
     let role_id: Option<i64> = sqlx::query_scalar("SELECT id FROM roles WHERE name = ?")
         .bind(&payload.role_name)
         .fetch_optional(&state.pool)
@@ -712,18 +722,23 @@ pub async fn create_order(
     Json(payload): Json<CreateOrderRequest>,
 ) -> Result<Json<OrderResponse>, AppError> {
     let current_user = auth::require_user(current_user)?;
+    if payload.quantity <= 0 {
+        return Err(AppError::bad_request("quantity must be greater than zero"));
+    }
+
+    let mut tx = state.pool.begin().await?;
     let listing_row = sqlx::query("SELECT price_cents FROM listings WHERE id = ?")
         .bind(&payload.listing_id)
-        .fetch_optional(&state.pool)
+        .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| AppError::not_found("listing not found"))?;
 
     let available_devices = sqlx::query(
-        "SELECT id FROM inventory_devices WHERE listing_id = ? AND status = 'on_hand' LIMIT ?",
+        "SELECT id FROM inventory_devices WHERE listing_id = ? AND status = 'on_hand' ORDER BY id LIMIT ?",
     )
     .bind(&payload.listing_id)
     .bind(payload.quantity)
-    .fetch_all(&state.pool)
+    .fetch_all(&mut *tx)
     .await?;
 
     if available_devices.len() < payload.quantity as usize {
@@ -738,7 +753,7 @@ pub async fn create_order(
         .bind(&order_id)
         .bind(&current_user.id)
         .bind(total_cents)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await?;
 
     sqlx::query(
@@ -750,16 +765,29 @@ pub async fn create_order(
     .bind(&payload.listing_id)
     .bind(payload.quantity)
     .bind(price_cents)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await?;
 
+    let mut sold_count = 0_i64;
     for row in available_devices {
         let device_id: String = row.get("id");
-        sqlx::query("UPDATE inventory_devices SET status = 'sold', updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+        let result = sqlx::query(
+            "UPDATE inventory_devices
+             SET status = 'sold', updated_at = CURRENT_TIMESTAMP
+             WHERE id = ? AND status = 'on_hand'",
+        )
             .bind(&device_id)
-            .execute(&state.pool)
+            .execute(&mut *tx)
             .await?;
+        if result.rows_affected() != 1 {
+            return Err(AppError::bad_request("inventory changed during checkout; please retry"));
+        }
+        sold_count += 1;
     }
+    if sold_count != payload.quantity {
+        return Err(AppError::bad_request("inventory changed during checkout; please retry"));
+    }
+    tx.commit().await?;
 
     log_event(
         &state.pool,
@@ -839,7 +867,7 @@ pub async fn create_upload_session(
 ) -> Result<Json<UploadSessionResponse>, AppError> {
     let current_user = require_roles(
         current_user,
-        &["Administrator", "Inventory Clerk", "Support Agent", "Manager"],
+        &["Administrator", "Inventory Clerk", "Support Agent", "Manager", "Shopper"],
     )?;
     validate_mime(&payload.mime_type)?;
     let session_id = Uuid::new_v4().to_string();
@@ -872,18 +900,20 @@ pub async fn upload_chunk(
     Path((session_id, chunk_index)): Path<(String, i64)>,
     body: Bytes,
 ) -> Result<Json<UploadSessionResponse>, AppError> {
-    let _ = require_roles(
+    let current_user = require_roles(
         current_user,
-        &["Administrator", "Inventory Clerk", "Support Agent", "Manager"],
+        &["Administrator", "Inventory Clerk", "Support Agent", "Manager", "Shopper"],
     )?;
 
     let session = sqlx::query(
-        "SELECT total_chunks FROM media_upload_sessions WHERE id = ?",
+        "SELECT total_chunks, created_by FROM media_upload_sessions WHERE id = ?",
     )
     .bind(&session_id)
     .fetch_optional(&state.pool)
     .await?
     .ok_or_else(|| AppError::not_found("upload session not found"))?;
+    let session_owner: String = session.get("created_by");
+    ensure_upload_session_access(&current_user, &session_owner)?;
     let total_chunks: i64 = session.get("total_chunks");
     if chunk_index >= total_chunks {
         return Err(AppError::bad_request("chunk index out of range"));
@@ -950,16 +980,23 @@ pub async fn finalize_upload(
 ) -> Result<Json<UploadResponse>, AppError> {
     let current_user = require_roles(
         current_user,
-        &["Administrator", "Inventory Clerk", "Support Agent", "Manager"],
+        &["Administrator", "Inventory Clerk", "Support Agent", "Manager", "Shopper"],
     )?;
     let session = sqlx::query(
-        "SELECT file_name, mime_type, total_chunks, uploaded_chunks, target_listing_id, expected_sha256
+        "SELECT file_name, mime_type, total_chunks, uploaded_chunks, target_listing_id, expected_sha256, created_by, status
          FROM media_upload_sessions WHERE id = ?",
     )
     .bind(&session_id)
     .fetch_optional(&state.pool)
     .await?
     .ok_or_else(|| AppError::not_found("upload session not found"))?;
+    let session_owner: String = session.get("created_by");
+    ensure_upload_session_access(&current_user, &session_owner)?;
+
+    let status: String = session.get("status");
+    if status == "completed" {
+        return Err(AppError::bad_request("upload session already finalized"));
+    }
 
     let total_chunks: i64 = session.get("total_chunks");
     let uploaded_chunks: i64 = session.get("uploaded_chunks");
@@ -1053,12 +1090,50 @@ pub async fn playback_link(
     Path(media_id): Path<String>,
 ) -> Result<Json<PlaybackLinkResponse>, AppError> {
     let current_user = auth::require_user(current_user)?;
-    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM listing_media WHERE id = ?")
+    let media_row = sqlx::query("SELECT id, listing_id FROM listing_media WHERE id = ?")
         .bind(&media_id)
         .fetch_optional(&state.pool)
         .await?;
-    if exists.is_none() {
-        return Err(AppError::not_found("media not found"));
+    let media_row = media_row.ok_or_else(|| AppError::not_found("media not found"))?;
+
+    // Support staff can access any media
+    if !is_support_staff(&current_user.role_name) {
+        let listing_id: Option<String> = media_row.get("listing_id");
+        let mut authorized = false;
+
+        // Check if user owns the listing this media belongs to
+        if let Some(ref lid) = listing_id {
+            let owner: Option<String> = sqlx::query_scalar(
+                "SELECT seller_user_id FROM listings WHERE id = ?",
+            )
+            .bind(lid)
+            .fetch_optional(&state.pool)
+            .await?;
+            if owner.as_deref() == Some(&current_user.id) {
+                authorized = true;
+            }
+        }
+
+        // Check if user is involved in an after-sales case that has this media as evidence
+        if !authorized {
+            let case_access: Option<String> = sqlx::query_scalar(
+                "SELECT ase.id FROM after_sales_evidence ase
+                 JOIN after_sales_cases asc2 ON asc2.id = ase.case_id
+                 WHERE ase.media_id = ? AND (asc2.opened_by_user_id = ? OR ase.uploaded_by = ?)",
+            )
+            .bind(&media_id)
+            .bind(&current_user.id)
+            .bind(&current_user.id)
+            .fetch_optional(&state.pool)
+            .await?;
+            if case_access.is_some() {
+                authorized = true;
+            }
+        }
+
+        if !authorized {
+            return Err(AppError::forbidden("you do not have access to this media"));
+        }
     }
 
     let token = security::random_token();
@@ -1084,10 +1159,12 @@ pub async fn playback_link(
 
 pub async fn stream_media(
     State(state): State<AppState>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
     Path(token): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
+    let current_user = auth::require_user(current_user)?;
     let row = sqlx::query(
-        "SELECT lm.storage_path, lm.mime_type, mpt.expires_at
+        "SELECT lm.storage_path, lm.mime_type, mpt.expires_at, mpt.issued_to_user_id
          FROM media_playback_tokens mpt
          JOIN listing_media lm ON lm.id = mpt.media_id
          WHERE mpt.token = ?",
@@ -1103,6 +1180,10 @@ pub async fn stream_media(
         .with_timezone(&Utc);
     if expiry < Utc::now() {
         return Err(AppError::forbidden("playback token expired"));
+    }
+    let issued_to_user_id: String = row.get("issued_to_user_id");
+    if issued_to_user_id != current_user.id {
+        return Err(AppError::forbidden("playback token is not valid for this user"));
     }
 
     let storage_path: String = row.get("storage_path");
@@ -1127,6 +1208,27 @@ pub async fn create_inventory_document(
     let current_user = require_roles(current_user, &["Inventory Clerk", "Administrator"])?;
     if payload.lines.is_empty() {
         return Err(AppError::bad_request("at least one line item is required"));
+    }
+    let mut seen_device_ids = HashSet::new();
+    for line in &payload.lines {
+        if line.quantity != 1 {
+            return Err(AppError::bad_request(
+                "each inventory line must reference exactly one physical device",
+            ));
+        }
+        if !seen_device_ids.insert(line.device_id.clone()) {
+            return Err(AppError::bad_request(
+                "duplicate device_id in inventory document lines",
+            ));
+        }
+        let exists: Option<String> =
+            sqlx::query_scalar("SELECT id FROM inventory_devices WHERE id = ?")
+                .bind(&line.device_id)
+                .fetch_optional(&state.pool)
+                .await?;
+        if exists.is_none() {
+            return Err(AppError::not_found("inventory device not found"));
+        }
     }
 
     let document_id = Uuid::new_v4().to_string();
@@ -1485,6 +1587,8 @@ pub async fn attach_after_sales_evidence(
     Json(payload): Json<AttachEvidenceRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let current_user = auth::require_user(current_user)?;
+    ensure_after_sales_case_access(&state.pool, &current_user, &case_id).await?;
+    ensure_media_attach_access(&state.pool, &current_user, &payload.media_id).await?;
     sqlx::query(
         "INSERT INTO after_sales_evidence (id, case_id, media_id, uploaded_by)
          VALUES (?, ?, ?, ?)",
@@ -1496,6 +1600,85 @@ pub async fn attach_after_sales_evidence(
     .execute(&state.pool)
     .await?;
     Ok(Json(json!({"status": "attached"})))
+}
+
+pub async fn upload_after_sales_evidence(
+    State(state): State<AppState>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path(case_id): Path<String>,
+    mut multipart: Multipart,
+) -> Result<Json<UploadResponse>, AppError> {
+    let current_user = auth::require_user(current_user)?;
+    ensure_after_sales_case_access(&state.pool, &current_user, &case_id).await?;
+    tokio::fs::create_dir_all(&state.config.upload_dir).await?;
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| AppError::bad_request("invalid multipart payload"))?
+    {
+        if field.name() != Some("file") {
+            continue;
+        }
+        let mime_type = field
+            .content_type()
+            .map(str::to_string)
+            .ok_or_else(|| AppError::bad_request("content type is required"))?;
+        validate_mime(&mime_type)?;
+
+        let bytes = field
+            .bytes()
+            .await
+            .map_err(|_| AppError::bad_request("failed to read upload"))?;
+        if bytes.len() > state.config.max_upload_size_bytes {
+            return Err(AppError::bad_request("file exceeds maximum allowed upload size"));
+        }
+        let sha256 = security::sha256_hex(&bytes);
+        let media_id = Uuid::new_v4().to_string();
+        let playback_token = security::random_token();
+        let file_name = format!("{media_id}.bin");
+        let mut storage_path = PathBuf::from(&state.config.upload_dir);
+        storage_path.push(file_name);
+
+        let mut file = tokio::fs::File::create(&storage_path).await?;
+        file.write_all(&bytes).await?;
+        file.flush().await?;
+
+        sqlx::query(
+            "INSERT INTO listing_media (id, listing_id, storage_path, mime_type, sha256, size_bytes, media_kind, playback_token)
+             VALUES (?, NULL, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&media_id)
+        .bind(storage_path.to_string_lossy().to_string())
+        .bind(&mime_type)
+        .bind(&sha256)
+        .bind(bytes.len() as i64)
+        .bind(media_kind(&mime_type))
+        .bind(&playback_token)
+        .execute(&state.pool)
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO after_sales_evidence (id, case_id, media_id, uploaded_by)
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&case_id)
+        .bind(&media_id)
+        .bind(&current_user.id)
+        .execute(&state.pool)
+        .await?;
+
+        return Ok(Json(UploadResponse {
+            media_id,
+            mime_type,
+            sha256,
+            storage_path: storage_path.to_string_lossy().to_string(),
+            playback_token,
+        }));
+    }
+
+    Err(AppError::bad_request("multipart field `file` is required"))
 }
 
 pub async fn list_feature_flags(
@@ -1550,6 +1733,157 @@ pub async fn update_feature_flag(
     Ok(Json(row))
 }
 
+pub async fn list_cohorts(
+    State(state): State<AppState>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+) -> Result<Json<Vec<CohortRecord>>, AppError> {
+    let _ = require_roles(current_user, &["Administrator", "Manager"])?;
+    let rows = sqlx::query_as::<_, CohortRecord>(
+        "SELECT id, name, description, created_at FROM cohorts ORDER BY created_at DESC",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Json(rows))
+}
+
+pub async fn create_cohort(
+    State(state): State<AppState>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Json(payload): Json<CreateCohortRequest>,
+) -> Result<Json<CohortRecord>, AppError> {
+    let current_user = require_roles(current_user, &["Administrator", "Manager"])?;
+    let id = Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO cohorts (id, name, description) VALUES (?, ?, ?)")
+        .bind(&id)
+        .bind(&payload.name)
+        .bind(&payload.description)
+        .execute(&state.pool)
+        .await?;
+
+    db::insert_admin_audit(
+        &state.pool,
+        &current_user.id,
+        "create_cohort",
+        "cohorts",
+        &id,
+        json!({"name": payload.name, "description": payload.description}),
+    )
+    .await?;
+
+    let row = sqlx::query_as::<_, CohortRecord>(
+        "SELECT id, name, description, created_at FROM cohorts WHERE id = ?",
+    )
+    .bind(&id)
+    .fetch_one(&state.pool)
+    .await?;
+    Ok(Json(row))
+}
+
+pub async fn list_cohort_assignments(
+    State(state): State<AppState>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Query(query): Query<ListCohortAssignmentsQuery>,
+) -> Result<Json<Vec<CohortAssignmentRecord>>, AppError> {
+    let _ = require_roles(current_user, &["Administrator", "Manager"])?;
+    let rows = match (query.cohort_id.as_deref(), query.user_id.as_deref()) {
+        (Some(cohort_id), Some(user_id)) => {
+            sqlx::query_as::<_, CohortAssignmentRecord>(
+                "SELECT id, cohort_id, user_id, assigned_at
+                 FROM cohort_assignments
+                 WHERE cohort_id = ? AND user_id = ?
+                 ORDER BY assigned_at DESC",
+            )
+            .bind(cohort_id)
+            .bind(user_id)
+            .fetch_all(&state.pool)
+            .await?
+        }
+        (Some(cohort_id), None) => {
+            sqlx::query_as::<_, CohortAssignmentRecord>(
+                "SELECT id, cohort_id, user_id, assigned_at
+                 FROM cohort_assignments
+                 WHERE cohort_id = ?
+                 ORDER BY assigned_at DESC",
+            )
+            .bind(cohort_id)
+            .fetch_all(&state.pool)
+            .await?
+        }
+        (None, Some(user_id)) => {
+            sqlx::query_as::<_, CohortAssignmentRecord>(
+                "SELECT id, cohort_id, user_id, assigned_at
+                 FROM cohort_assignments
+                 WHERE user_id = ?
+                 ORDER BY assigned_at DESC",
+            )
+            .bind(user_id)
+            .fetch_all(&state.pool)
+            .await?
+        }
+        (None, None) => {
+            sqlx::query_as::<_, CohortAssignmentRecord>(
+                "SELECT id, cohort_id, user_id, assigned_at
+                 FROM cohort_assignments
+                 ORDER BY assigned_at DESC",
+            )
+            .fetch_all(&state.pool)
+            .await?
+        }
+    };
+    Ok(Json(rows))
+}
+
+pub async fn assign_cohort(
+    State(state): State<AppState>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Json(payload): Json<AssignCohortRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let current_user = require_roles(current_user, &["Administrator", "Manager"])?;
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM cohorts WHERE id = ?")
+        .bind(&payload.cohort_id)
+        .fetch_optional(&state.pool)
+        .await?;
+    if exists.is_none() {
+        return Err(AppError::not_found("cohort not found"));
+    }
+    let user_exists: Option<String> = sqlx::query_scalar("SELECT id FROM users WHERE id = ?")
+        .bind(&payload.user_id)
+        .fetch_optional(&state.pool)
+        .await?;
+    if user_exists.is_none() {
+        return Err(AppError::not_found("user not found"));
+    }
+
+    let result = sqlx::query(
+        "INSERT INTO cohort_assignments (id, cohort_id, user_id)
+         SELECT ?, ?, ?
+         WHERE NOT EXISTS (
+           SELECT 1 FROM cohort_assignments WHERE cohort_id = ? AND user_id = ?
+         )",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(&payload.cohort_id)
+    .bind(&payload.user_id)
+    .bind(&payload.cohort_id)
+    .bind(&payload.user_id)
+    .execute(&state.pool)
+    .await?;
+
+    let status = if result.rows_affected() == 1 { "assigned" } else { "already_assigned" };
+
+    db::insert_admin_audit(
+        &state.pool,
+        &current_user.id,
+        "assign_cohort",
+        "cohort_assignments",
+        &payload.cohort_id,
+        json!({"cohort_id": payload.cohort_id, "user_id": payload.user_id, "result": status}),
+    )
+    .await?;
+
+    Ok(Json(json!({ "status": status })))
+}
+
 pub async fn list_ratings_review(
     State(state): State<AppState>,
     Extension(current_user): Extension<Option<CurrentUser>>,
@@ -1591,6 +1925,302 @@ pub async fn list_appeals(
             })
             .collect(),
     ))
+}
+
+pub async fn create_listing(
+    State(state): State<AppState>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Json(payload): Json<CreateListingRequest>,
+) -> Result<Json<ListingCard>, AppError> {
+    let current_user = require_roles(
+        current_user,
+        &["Shopper", "Inventory Clerk", "Administrator", "Manager"],
+    )?;
+    if payload.price_cents < 0 {
+        return Err(AppError::bad_request("price_cents must be non-negative"));
+    }
+    let id = Uuid::new_v4().to_string();
+    let currency = payload.currency.unwrap_or_else(|| "USD".to_string());
+    sqlx::query(
+        "INSERT INTO listings (id, seller_user_id, campus_id, taxonomy_node_id, condition_id, title, description, price_cents, currency, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft')",
+    )
+    .bind(&id)
+    .bind(&current_user.id)
+    .bind(&payload.campus_id)
+    .bind(&payload.taxonomy_node_id)
+    .bind(payload.condition_id)
+    .bind(&payload.title)
+    .bind(&payload.description)
+    .bind(payload.price_cents)
+    .bind(&currency)
+    .execute(&state.pool)
+    .await?;
+
+    let row = sqlx::query_as::<_, ListingCard>(
+        "SELECT l.id, l.title, l.description, l.price_cents, l.status, l.created_at,
+                c.name as campus_name, c.zip_code as campus_zip_code,
+                lc.code as condition_code, tn.slug as category_slug
+         FROM listings l
+         LEFT JOIN campuses c ON c.id = l.campus_id
+         LEFT JOIN listing_conditions lc ON lc.id = l.condition_id
+         LEFT JOIN taxonomy_nodes tn ON tn.id = l.taxonomy_node_id
+         WHERE l.id = ?",
+    )
+    .bind(&id)
+    .fetch_one(&state.pool)
+    .await?;
+    Ok(Json(row))
+}
+
+pub async fn create_rating(
+    State(state): State<AppState>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Json(payload): Json<CreateRatingRequest>,
+) -> Result<Json<RatingRecord>, AppError> {
+    let current_user = auth::require_user(current_user)?;
+    if !(1..=5).contains(&payload.score) {
+        return Err(AppError::bad_request("score must be between 1 and 5"));
+    }
+    let listing_exists: Option<String> =
+        sqlx::query_scalar("SELECT id FROM listings WHERE id = ?")
+            .bind(&payload.listing_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    if listing_exists.is_none() {
+        return Err(AppError::not_found("listing not found"));
+    }
+    let id = Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO ratings (id, listing_id, user_id, score, comments) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(&payload.listing_id)
+    .bind(&current_user.id)
+    .bind(payload.score)
+    .bind(&payload.comments)
+    .execute(&state.pool)
+    .await?;
+
+    let row = sqlx::query_as::<_, RatingRecord>(
+        "SELECT id, listing_id, user_id, score, comments, created_at FROM ratings WHERE id = ?",
+    )
+    .bind(&id)
+    .fetch_one(&state.pool)
+    .await?;
+    Ok(Json(row))
+}
+
+pub async fn create_appeal_ticket(
+    State(state): State<AppState>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Json(payload): Json<CreateAppealTicketRequest>,
+) -> Result<Json<AppealTicketRecord>, AppError> {
+    let current_user = auth::require_user(current_user)?;
+    if payload.reason.trim().is_empty() {
+        return Err(AppError::bad_request("reason is required"));
+    }
+    let id = Uuid::new_v4().to_string();
+    let ticket_no = format!("APL-{}", &id[..8].to_uppercase());
+    sqlx::query(
+        "INSERT INTO appeal_tickets (id, ticket_no, listing_id, shipment_order_id, opened_by_user_id, status, reason)
+         VALUES (?, ?, ?, ?, ?, 'open', ?)",
+    )
+    .bind(&id)
+    .bind(&ticket_no)
+    .bind(&payload.listing_id)
+    .bind(&payload.shipment_order_id)
+    .bind(&current_user.id)
+    .bind(&payload.reason)
+    .execute(&state.pool)
+    .await?;
+
+    let row = sqlx::query_as::<_, AppealTicketRecord>(
+        "SELECT id, ticket_no, status, reason, resolution, created_at FROM appeal_tickets WHERE id = ?",
+    )
+    .bind(&id)
+    .fetch_one(&state.pool)
+    .await?;
+    Ok(Json(row))
+}
+
+pub async fn list_taxonomy_tags(
+    State(state): State<AppState>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+) -> Result<Json<Vec<TaxonomyTagRecord>>, AppError> {
+    let _ = auth::require_user(current_user)?;
+    let rows = sqlx::query_as::<_, TaxonomyTagRecord>(
+        "SELECT id, name, slug FROM taxonomy_tags ORDER BY name",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Json(rows))
+}
+
+pub async fn create_taxonomy_tag(
+    State(state): State<AppState>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Json(payload): Json<CreateTaxonomyTagRequest>,
+) -> Result<Json<TaxonomyTagRecord>, AppError> {
+    let _ = require_roles(current_user, &["Administrator", "Manager"])?;
+    let id = Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO taxonomy_tags (id, name, slug) VALUES (?, ?, ?)")
+        .bind(&id)
+        .bind(&payload.name)
+        .bind(&payload.slug)
+        .execute(&state.pool)
+        .await?;
+    let row = sqlx::query_as::<_, TaxonomyTagRecord>(
+        "SELECT id, name, slug FROM taxonomy_tags WHERE id = ?",
+    )
+    .bind(&id)
+    .fetch_one(&state.pool)
+    .await?;
+    Ok(Json(row))
+}
+
+pub async fn list_taxonomy_keywords(
+    State(state): State<AppState>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+) -> Result<Json<Vec<TaxonomyKeywordRecord>>, AppError> {
+    let _ = auth::require_user(current_user)?;
+    let rows = sqlx::query_as::<_, TaxonomyKeywordRecord>(
+        "SELECT id, keyword FROM taxonomy_keywords ORDER BY keyword",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Json(rows))
+}
+
+pub async fn create_taxonomy_keyword(
+    State(state): State<AppState>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Json(payload): Json<CreateTaxonomyKeywordRequest>,
+) -> Result<Json<TaxonomyKeywordRecord>, AppError> {
+    let _ = require_roles(current_user, &["Administrator", "Manager"])?;
+    let id = Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO taxonomy_keywords (id, keyword) VALUES (?, ?)")
+        .bind(&id)
+        .bind(&payload.keyword)
+        .execute(&state.pool)
+        .await?;
+    let row = sqlx::query_as::<_, TaxonomyKeywordRecord>(
+        "SELECT id, keyword FROM taxonomy_keywords WHERE id = ?",
+    )
+    .bind(&id)
+    .fetch_one(&state.pool)
+    .await?;
+    Ok(Json(row))
+}
+
+pub async fn associate_taxonomy_tag(
+    State(state): State<AppState>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path(node_id): Path<String>,
+    Json(payload): Json<AssociateTaxonomyTagRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let _ = require_roles(current_user, &["Administrator", "Manager"])?;
+    let node_exists: Option<String> =
+        sqlx::query_scalar("SELECT id FROM taxonomy_nodes WHERE id = ?")
+            .bind(&node_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    if node_exists.is_none() {
+        return Err(AppError::not_found("taxonomy node not found"));
+    }
+    let tag_exists: Option<String> =
+        sqlx::query_scalar("SELECT id FROM taxonomy_tags WHERE id = ?")
+            .bind(&payload.tag_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    if tag_exists.is_none() {
+        return Err(AppError::not_found("tag not found"));
+    }
+    let result = sqlx::query(
+        "INSERT OR IGNORE INTO taxonomy_node_tags (node_id, tag_id) VALUES (?, ?)",
+    )
+    .bind(&node_id)
+    .bind(&payload.tag_id)
+    .execute(&state.pool)
+    .await?;
+    Ok(Json(json!({
+        "status": if result.rows_affected() == 1 { "associated" } else { "already_associated" }
+    })))
+}
+
+pub async fn associate_taxonomy_keyword(
+    State(state): State<AppState>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path(node_id): Path<String>,
+    Json(payload): Json<AssociateTaxonomyKeywordRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let _ = require_roles(current_user, &["Administrator", "Manager"])?;
+    let node_exists: Option<String> =
+        sqlx::query_scalar("SELECT id FROM taxonomy_nodes WHERE id = ?")
+            .bind(&node_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    if node_exists.is_none() {
+        return Err(AppError::not_found("taxonomy node not found"));
+    }
+    let kw_exists: Option<String> =
+        sqlx::query_scalar("SELECT id FROM taxonomy_keywords WHERE id = ?")
+            .bind(&payload.keyword_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    if kw_exists.is_none() {
+        return Err(AppError::not_found("keyword not found"));
+    }
+    let result = sqlx::query(
+        "INSERT OR IGNORE INTO taxonomy_node_keywords (node_id, keyword_id) VALUES (?, ?)",
+    )
+    .bind(&node_id)
+    .bind(&payload.keyword_id)
+    .execute(&state.pool)
+    .await?;
+    Ok(Json(json!({
+        "status": if result.rows_affected() == 1 { "associated" } else { "already_associated" }
+    })))
+}
+
+pub async fn list_my_announcement_deliveries(
+    State(state): State<AppState>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+) -> Result<Json<Vec<AnnouncementRecord>>, AppError> {
+    let current_user = auth::require_user(current_user)?;
+    let rows = sqlx::query_as::<_, AnnouncementRecord>(
+        "SELECT a.id, a.title, a.body, a.severity, a.starts_at, a.ends_at, a.created_at
+         FROM announcement_deliveries d
+         JOIN announcements a ON a.id = d.announcement_id
+         WHERE d.user_id = ?
+         ORDER BY d.delivered_at DESC",
+    )
+    .bind(&current_user.id)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Json(rows))
+}
+
+pub async fn mark_announcement_read(
+    State(state): State<AppState>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path(announcement_id): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let current_user = auth::require_user(current_user)?;
+    let result = sqlx::query(
+        "UPDATE announcement_deliveries
+         SET read_at = COALESCE(read_at, CURRENT_TIMESTAMP)
+         WHERE announcement_id = ? AND user_id = ?",
+    )
+    .bind(&announcement_id)
+    .bind(&current_user.id)
+    .execute(&state.pool)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::not_found("announcement delivery not found"));
+    }
+    Ok(Json(json!({"status": "read"})))
 }
 
 pub async fn list_local_credentials(
@@ -1873,6 +2503,89 @@ pub async fn create_announcement(
     Ok(Json(record))
 }
 
+pub async fn create_announcement_deliveries(
+    State(state): State<AppState>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path(announcement_id): Path<String>,
+    Json(payload): Json<CreateAnnouncementDeliveriesRequest>,
+) -> Result<Json<AnnouncementDeliveryBatchResponse>, AppError> {
+    let current_user = auth::require_admin(current_user)?;
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM announcements WHERE id = ?")
+        .bind(&announcement_id)
+        .fetch_optional(&state.pool)
+        .await?;
+    if exists.is_none() {
+        return Err(AppError::not_found("announcement not found"));
+    }
+
+    let CreateAnnouncementDeliveriesRequest { user_ids, cohort_id } = payload;
+    let target_users: Vec<String> = if let Some(user_ids) = user_ids {
+        user_ids
+    } else if let Some(cohort_id) = cohort_id {
+        sqlx::query_scalar("SELECT user_id FROM cohort_assignments WHERE cohort_id = ?")
+            .bind(&cohort_id)
+            .fetch_all(&state.pool)
+            .await?
+    } else {
+        sqlx::query_scalar("SELECT id FROM users")
+            .fetch_all(&state.pool)
+            .await?
+    };
+
+    let mut delivered_count = 0_i64;
+    for user_id in target_users {
+        let result = sqlx::query(
+            "INSERT INTO announcement_deliveries (id, announcement_id, user_id)
+             SELECT ?, ?, ?
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM announcement_deliveries
+                 WHERE announcement_id = ? AND user_id = ?
+             )",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&announcement_id)
+        .bind(&user_id)
+        .bind(&announcement_id)
+        .bind(&user_id)
+        .execute(&state.pool)
+        .await?;
+        delivered_count += result.rows_affected() as i64;
+    }
+
+    db::insert_admin_audit(
+        &state.pool,
+        &current_user.id,
+        "create_announcement_deliveries",
+        "announcement_deliveries",
+        &announcement_id,
+        json!({"announcement_id": &announcement_id, "delivered_count": delivered_count}),
+    )
+    .await?;
+
+    Ok(Json(AnnouncementDeliveryBatchResponse {
+        announcement_id,
+        delivered_count,
+    }))
+}
+
+pub async fn list_announcement_deliveries(
+    State(state): State<AppState>,
+    Extension(current_user): Extension<Option<CurrentUser>>,
+    Path(announcement_id): Path<String>,
+) -> Result<Json<Vec<AnnouncementDeliveryRecord>>, AppError> {
+    let _ = auth::require_admin(current_user)?;
+    let rows = sqlx::query_as::<_, AnnouncementDeliveryRecord>(
+        "SELECT announcement_id, user_id, delivered_at, read_at
+         FROM announcement_deliveries
+         WHERE announcement_id = ?
+         ORDER BY delivered_at DESC",
+    )
+    .bind(&announcement_id)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Json(rows))
+}
+
 pub async fn dashboard_metrics(
     State(state): State<AppState>,
     Extension(current_user): Extension<Option<CurrentUser>>,
@@ -1951,6 +2664,9 @@ pub async fn upload_media(
             .bytes()
             .await
             .map_err(|_| AppError::bad_request("failed to read upload"))?;
+        if bytes.len() > state.config.max_upload_size_bytes {
+            return Err(AppError::bad_request("file exceeds maximum allowed upload size"));
+        }
         let sha256 = security::sha256_hex(&bytes);
         let media_id = Uuid::new_v4().to_string();
         let playback_token = security::random_token();
@@ -2249,8 +2965,20 @@ async fn execute_inventory_document(
     .fetch_all(pool)
     .await?;
 
+    let mut seen_device_ids = HashSet::new();
     for line in lines {
         let device_id: String = line.get("device_id");
+        let quantity: i64 = line.get("quantity");
+        if quantity != 1 {
+            return Err(AppError::bad_request(
+                "inventory document line quantity must be exactly 1",
+            ));
+        }
+        if !seen_device_ids.insert(device_id.clone()) {
+            return Err(AppError::bad_request(
+                "duplicate device_id in inventory document lines",
+            ));
+        }
         let target_campus: Option<String> = line.get("target_campus_id");
         let before = sqlx::query(
             "SELECT campus_id, status, metadata_json FROM inventory_devices WHERE id = ?",
@@ -2339,6 +3067,68 @@ fn require_roles(
         Ok(user)
     } else {
         Err(AppError::forbidden("role not permitted for this action"))
+    }
+}
+
+fn is_support_staff(role_name: &str) -> bool {
+    matches!(role_name, "Support Agent" | "Administrator" | "Manager")
+}
+
+fn is_upload_session_privileged(role_name: &str) -> bool {
+    matches!(role_name, "Administrator" | "Manager")
+}
+
+fn ensure_upload_session_access(current_user: &CurrentUser, session_owner_id: &str) -> Result<(), AppError> {
+    if current_user.id == session_owner_id || is_upload_session_privileged(&current_user.role_name) {
+        Ok(())
+    } else {
+        Err(AppError::forbidden("not authorized for this upload session"))
+    }
+}
+
+async fn ensure_after_sales_case_access(
+    pool: &sqlx::SqlitePool,
+    current_user: &CurrentUser,
+    case_id: &str,
+) -> Result<(), AppError> {
+    let row = sqlx::query("SELECT opened_by_user_id FROM after_sales_cases WHERE id = ?")
+        .bind(case_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| AppError::not_found("case not found"))?;
+    let opened_by_user_id: String = row.get("opened_by_user_id");
+    if is_support_staff(&current_user.role_name) || opened_by_user_id == current_user.id {
+        Ok(())
+    } else {
+        Err(AppError::forbidden("not authorized for this after-sales case"))
+    }
+}
+
+async fn ensure_media_attach_access(
+    pool: &sqlx::SqlitePool,
+    current_user: &CurrentUser,
+    media_id: &str,
+) -> Result<(), AppError> {
+    let row = sqlx::query(
+        "SELECT mus.created_by
+         FROM listing_media lm
+         LEFT JOIN media_upload_sessions mus ON mus.id = lm.chunk_group
+         WHERE lm.id = ?",
+    )
+    .bind(media_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| AppError::not_found("media not found"))?;
+
+    if is_support_staff(&current_user.role_name) {
+        return Ok(());
+    }
+
+    let media_owner = row.get::<Option<String>, _>("created_by");
+    if media_owner.as_deref() == Some(current_user.id.as_str()) {
+        Ok(())
+    } else {
+        Err(AppError::forbidden("not authorized to attach this media"))
     }
 }
 

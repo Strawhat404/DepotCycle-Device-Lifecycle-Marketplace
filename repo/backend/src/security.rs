@@ -6,7 +6,7 @@ use argon2::{
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
 };
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use base64::{engine::general_purpose::{STANDARD as B64, URL_SAFE_NO_PAD as B64URL}, Engine};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
@@ -92,7 +92,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 pub fn random_token() -> String {
     let mut raw = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut raw);
-    B64.encode(raw)
+    B64URL.encode(raw)
 }
 
 pub fn now_utc() -> chrono::DateTime<chrono::Utc> {

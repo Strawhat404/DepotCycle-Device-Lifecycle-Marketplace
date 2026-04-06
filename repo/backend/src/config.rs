@@ -17,6 +17,8 @@ pub struct AppConfig {
     pub admin_display_name: String,
     pub admin_phone: String,
     pub public_api_base_url: String,
+    pub allowed_origin: String,
+    pub max_upload_size_bytes: usize,
 }
 
 impl AppConfig {
@@ -54,6 +56,12 @@ impl AppConfig {
                 .unwrap_or_else(|_| "+15550001111".to_string()),
             public_api_base_url: env::var("PUBLIC_API_BASE_URL")
                 .unwrap_or_else(|_| "http://localhost:3000".to_string()),
+            allowed_origin: env::var("ALLOWED_ORIGIN")
+                .unwrap_or_else(|_| "http://localhost".to_string()),
+            max_upload_size_bytes: env::var("MAX_UPLOAD_SIZE_BYTES")
+                .unwrap_or_else(|_| "52428800".to_string()) // 50 MiB default
+                .parse()
+                .map_err(|_| AppError::internal("invalid MAX_UPLOAD_SIZE_BYTES"))?,
         })
     }
 }
