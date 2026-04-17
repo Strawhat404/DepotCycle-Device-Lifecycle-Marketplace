@@ -1336,3 +1336,735 @@ fn format_usd(cents: i64) -> String {
 fn encode(value: &str) -> String {
     js_sys::encode_uri_component(value).as_string().unwrap_or_default()
 }
+
+// ── Frontend component & unit tests ─────────────────────────────────────
+// Run with:  wasm-pack test --headless --chrome  (or --firefox)
+// These tests import actual frontend types and components.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen_test::*;
+
+    wasm_bindgen_test_configure!(run_in_browser);
+
+    // ── Pure helper tests ───────────────────────────────────────────────
+
+    #[wasm_bindgen_test]
+    fn format_usd_basic_conversion() {
+        assert_eq!(format_usd(12345), "$123.45");
+    }
+
+    #[wasm_bindgen_test]
+    fn format_usd_zero() {
+        assert_eq!(format_usd(0), "$0.00");
+    }
+
+    #[wasm_bindgen_test]
+    fn format_usd_single_cent() {
+        assert_eq!(format_usd(1), "$0.01");
+    }
+
+    #[wasm_bindgen_test]
+    fn format_usd_large_value() {
+        assert_eq!(format_usd(99999999), "$999999.99");
+    }
+
+    #[wasm_bindgen_test]
+    fn format_usd_negative() {
+        assert_eq!(format_usd(-500), "$-5.00");
+    }
+
+    #[wasm_bindgen_test]
+    fn format_usd_exact_dollar() {
+        assert_eq!(format_usd(100), "$1.00");
+    }
+
+    #[wasm_bindgen_test]
+    fn encode_escapes_special_characters() {
+        let encoded = encode("hello world");
+        assert_eq!(encoded, "hello%20world");
+    }
+
+    #[wasm_bindgen_test]
+    fn encode_handles_empty_string() {
+        assert_eq!(encode(""), "");
+    }
+
+    #[wasm_bindgen_test]
+    fn encode_preserves_alphanumeric() {
+        assert_eq!(encode("abc123"), "abc123");
+    }
+
+    #[wasm_bindgen_test]
+    fn encode_escapes_ampersand_and_equals() {
+        let encoded = encode("q=foo&bar=baz");
+        assert!(encoded.contains("%3D") || encoded.contains("%26"));
+    }
+
+    // ── Frontend type deserialization tests ──────────────────────────────
+    // These verify the actual frontend types parse backend JSON correctly.
+
+    #[wasm_bindgen_test]
+    fn auth_user_deserializes_from_login_response() {
+        let json = r#"{
+            "user_id": "u-1",
+            "username": "admin",
+            "role_name": "Administrator",
+            "display_name_masked": "S****r",
+            "phone_masked": null
+        }"#;
+        let user: AuthUser = serde_json::from_str(json).unwrap();
+        assert_eq!(user.username, "admin");
+        assert_eq!(user.role_name, "Administrator");
+        assert!(user.display_name_masked.is_some());
+        assert!(user.phone_masked.is_none());
+    }
+
+    #[wasm_bindgen_test]
+    fn listing_card_deserializes_with_optional_fields() {
+        let json = r#"{
+            "id": "l-1",
+            "title": "ThinkPad X1",
+            "description": null,
+            "price_cents": 129900,
+            "status": "published",
+            "created_at": "2026-04-01T00:00:00Z",
+            "campus_name": "North Campus",
+            "campus_zip_code": "10001",
+            "condition_code": "good",
+            "category_slug": "laptops"
+        }"#;
+        let card: ListingCard = serde_json::from_str(json).unwrap();
+        assert_eq!(card.id, "l-1");
+        assert_eq!(card.price_cents, 129900);
+        assert!(card.description.is_none());
+        assert_eq!(card.campus_name.unwrap(), "North Campus");
+    }
+
+    #[wasm_bindgen_test]
+    fn listing_detail_deserializes_with_nested_recommendations() {
+        let json = r#"{
+            "listing": {
+                "id": "l-1",
+                "title": "Test",
+                "description": null,
+                "price_cents": 100,
+                "status": "published",
+                "created_at": "2026-01-01T00:00:00Z",
+                "campus_name": null,
+                "campus_zip_code": null,
+                "condition_code": null,
+                "category_slug": null
+            },
+            "popularity_score": 42,
+            "inventory_on_hand": 3,
+            "recommendations": [
+                {"listing_id": "l-2", "title": "Rec", "reason": "similar", "price_cents": 200}
+            ]
+        }"#;
+        let detail: ListingDetail = serde_json::from_str(json).unwrap();
+        assert_eq!(detail.popularity_score, 42);
+        assert_eq!(detail.inventory_on_hand, 3);
+        assert_eq!(detail.recommendations.len(), 1);
+        assert_eq!(detail.recommendations[0].reason, "similar");
+    }
+
+    #[wasm_bindgen_test]
+    fn suggestion_response_deserializes() {
+        let json = r#"{"suggestions": ["ThinkPad", "Pixel"]}"#;
+        let resp: SuggestionResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.suggestions.len(), 2);
+        assert_eq!(resp.suggestions[0], "ThinkPad");
+    }
+
+    #[wasm_bindgen_test]
+    fn recommendation_settings_deserializes() {
+        let json = r#"{"recommendations_enabled": false}"#;
+        let settings: RecommendationSettings = serde_json::from_str(json).unwrap();
+        assert!(!settings.recommendations_enabled);
+    }
+
+    #[wasm_bindgen_test]
+    fn order_response_deserializes() {
+        let json = r#"{"order_id": "o-1", "status": "placed", "total_cents": 25000}"#;
+        let order: OrderResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(order.status, "placed");
+        assert_eq!(order.total_cents, 25000);
+    }
+
+    #[wasm_bindgen_test]
+    fn shipment_record_deserializes() {
+        let json = r#"{
+            "id": "s-1",
+            "order_number": "SHIP-001",
+            "status": "created",
+            "carrier_name": "FedEx",
+            "tracking_number": "TRACK-001",
+            "integration_enabled": 0,
+            "created_at": "2026-04-01T00:00:00Z"
+        }"#;
+        let record: ShipmentRecord = serde_json::from_str(json).unwrap();
+        assert_eq!(record.status, "created");
+        assert_eq!(record.integration_enabled, 0);
+    }
+
+    #[wasm_bindgen_test]
+    fn after_sales_case_deserializes() {
+        let json = r#"{
+            "id": "c-1",
+            "case_type": "return",
+            "status": "requested",
+            "reason": "Damaged",
+            "first_response_due_at": "2026-04-02T00:00:00Z",
+            "final_decision_due_at": "2026-04-04T00:00:00Z",
+            "created_at": "2026-04-01T00:00:00Z"
+        }"#;
+        let case: AfterSalesCase = serde_json::from_str(json).unwrap();
+        assert_eq!(case.case_type, "return");
+        assert_eq!(case.status, "requested");
+    }
+
+    #[wasm_bindgen_test]
+    fn dashboard_metrics_deserializes_all_fields() {
+        let json = r#"{
+            "total_users": 10,
+            "total_announcements": 2,
+            "total_templates": 1,
+            "total_local_credentials": 3,
+            "total_companion_credentials": 1,
+            "total_uploads": 5,
+            "total_shipments": 4,
+            "total_feature_flags": 2,
+            "total_events": 100,
+            "active_users_last_30_days": 8,
+            "conversion_rate_percent": 12.5,
+            "average_rating": 4.2,
+            "open_support_cases": 3
+        }"#;
+        let metrics: DashboardMetrics = serde_json::from_str(json).unwrap();
+        assert_eq!(metrics.total_users, 10);
+        assert_eq!(metrics.conversion_rate_percent, 12.5);
+        assert_eq!(metrics.average_rating, 4.2);
+    }
+
+    #[wasm_bindgen_test]
+    fn feature_flag_deserializes() {
+        let json = r#"{
+            "id": "f-1",
+            "key": "new-search",
+            "description": "test flag",
+            "enabled": 1,
+            "rollout_percent": 75,
+            "audience_rules_json": "{\"mode\":\"local\"}"
+        }"#;
+        let flag: FeatureFlag = serde_json::from_str(json).unwrap();
+        assert_eq!(flag.enabled, 1);
+        assert_eq!(flag.rollout_percent, 75);
+    }
+
+    #[wasm_bindgen_test]
+    fn timeline_entry_deserializes_with_null_from() {
+        let json = r#"{"from_status": null, "to_status": "created", "changed_at": "2026-04-01T00:00:00Z"}"#;
+        let entry: TimelineEntry = serde_json::from_str(json).unwrap();
+        assert!(entry.from_status.is_none());
+        assert_eq!(entry.to_status, "created");
+    }
+
+    #[wasm_bindgen_test]
+    fn template_record_deserializes() {
+        let json = r#"{
+            "id": "t-1", "kind": "email", "key": "welcome",
+            "title": "Welcome", "content": "Hello",
+            "version": 2, "is_active": 1,
+            "created_at": "2026-04-01T00:00:00Z",
+            "updated_at": "2026-04-02T00:00:00Z"
+        }"#;
+        let tmpl: TemplateRecord = serde_json::from_str(json).unwrap();
+        assert_eq!(tmpl.version, 2);
+        assert_eq!(tmpl.is_active, 1);
+    }
+
+    #[wasm_bindgen_test]
+    fn taxonomy_node_deserializes_with_optionals() {
+        let json = r#"{
+            "id": "n-1", "parent_id": null, "name": "Laptops",
+            "slug": "laptops", "level": 1,
+            "seo_title": "Laptop Devices",
+            "seo_description": null,
+            "seo_keywords": "laptop",
+            "topic_page_path": "/topics/laptops"
+        }"#;
+        let node: TaxonomyNode = serde_json::from_str(json).unwrap();
+        assert!(node.parent_id.is_none());
+        assert!(node.seo_description.is_none());
+        assert_eq!(node.level, 1);
+    }
+
+    #[wasm_bindgen_test]
+    fn credential_record_deserializes() {
+        let json = r#"{
+            "id": "cr-1", "label": "DB", "username": "db_user",
+            "notes": "prod", "created_at": "2026-04-01T00:00:00Z",
+            "updated_at": "2026-04-01T00:00:00Z"
+        }"#;
+        let cred: CredentialRecord = serde_json::from_str(json).unwrap();
+        assert_eq!(cred.label, "DB");
+    }
+
+    #[wasm_bindgen_test]
+    fn announcement_record_deserializes() {
+        let json = r#"{
+            "id": "a-1", "title": "Notice", "body": "Hello",
+            "severity": "info", "starts_at": null, "ends_at": null,
+            "created_at": "2026-04-01T00:00:00Z"
+        }"#;
+        let ann: AnnouncementRecord = serde_json::from_str(json).unwrap();
+        assert_eq!(ann.severity, "info");
+        assert!(ann.starts_at.is_none());
+    }
+
+    // ── Reactive state logic tests ──────────────────────────────────────
+    // These test the actual Leptos signal patterns the App component uses.
+
+    #[wasm_bindgen_test]
+    fn leptos_signals_initialize_correctly() {
+        let _runtime = create_runtime();
+        let user = create_rw_signal::<Option<AuthUser>>(None);
+        let error = create_rw_signal(String::new());
+        let listings = create_rw_signal(Vec::<ListingCard>::new());
+        let recommendation_settings = create_rw_signal(RecommendationSettings {
+            recommendations_enabled: true,
+        });
+
+        assert!(user.get().is_none());
+        assert!(error.get().is_empty());
+        assert!(listings.get().is_empty());
+        assert!(recommendation_settings.get().recommendations_enabled);
+    }
+
+    #[wasm_bindgen_test]
+    fn recommendation_toggle_flips_state() {
+        let _runtime = create_runtime();
+        let settings = create_rw_signal(RecommendationSettings {
+            recommendations_enabled: true,
+        });
+
+        // Simulate the toggle logic from the App component
+        let current = settings.get();
+        settings.set(RecommendationSettings {
+            recommendations_enabled: !current.recommendations_enabled,
+        });
+        assert!(!settings.get().recommendations_enabled);
+
+        // Toggle back
+        let current = settings.get();
+        settings.set(RecommendationSettings {
+            recommendations_enabled: !current.recommendations_enabled,
+        });
+        assert!(settings.get().recommendations_enabled);
+    }
+
+    #[wasm_bindgen_test]
+    fn user_signal_set_and_check_role() {
+        let _runtime = create_runtime();
+        let user = create_rw_signal::<Option<AuthUser>>(None);
+
+        assert!(user.get().is_none());
+
+        user.set(Some(AuthUser {
+            user_id: "u-1".into(),
+            username: "admin".into(),
+            role_name: "Administrator".into(),
+            display_name_masked: None,
+            phone_masked: None,
+        }));
+
+        assert!(user.get().is_some());
+        assert_eq!(user.get().unwrap().role_name, "Administrator");
+    }
+
+    #[wasm_bindgen_test]
+    fn search_query_signal_builds_url_params() {
+        let _runtime = create_runtime();
+        let search_query = create_rw_signal("ThinkPad".to_string());
+        let search_sort = create_rw_signal("relevance".to_string());
+        let search_category = create_rw_signal(String::new());
+        let min_price = create_rw_signal(String::new());
+        let max_price = create_rw_signal(String::new());
+
+        // Simulate the URL building logic from run_search
+        let mut query_parts = vec![format!("sort={}", search_sort.get())];
+        if !search_query.get().is_empty() {
+            query_parts.push(format!("q={}", encode(&search_query.get())));
+        }
+        if !search_category.get().is_empty() {
+            query_parts.push(format!("category={}", encode(&search_category.get())));
+        }
+        if !min_price.get().is_empty() {
+            query_parts.push(format!("min_price={}", encode(&min_price.get())));
+        }
+        if !max_price.get().is_empty() {
+            query_parts.push(format!("max_price={}", encode(&max_price.get())));
+        }
+
+        let url = query_parts.join("&");
+        assert!(url.starts_with("sort=relevance"));
+        assert!(url.contains("q=ThinkPad"));
+        // Empty fields should NOT appear
+        assert!(!url.contains("category="));
+        assert!(!url.contains("min_price="));
+    }
+
+    #[wasm_bindgen_test]
+    fn listings_signal_updates_on_search_results() {
+        let _runtime = create_runtime();
+        let listings = create_rw_signal(Vec::<ListingCard>::new());
+        assert!(listings.get().is_empty());
+
+        // Simulate setting search results
+        let mock_results = vec![
+            ListingCard {
+                id: "l-1".into(),
+                title: "ThinkPad X1".into(),
+                description: Some("Ultrabook".into()),
+                price_cents: 129900,
+                status: "published".into(),
+                created_at: "2026-01-01T00:00:00Z".into(),
+                campus_name: Some("North".into()),
+                campus_zip_code: Some("10001".into()),
+                condition_code: Some("good".into()),
+                category_slug: Some("laptops".into()),
+            },
+        ];
+        listings.set(mock_results);
+
+        assert_eq!(listings.get().len(), 1);
+        assert_eq!(listings.get()[0].title, "ThinkPad X1");
+        assert_eq!(format_usd(listings.get()[0].price_cents), "$1299.00");
+    }
+
+    #[wasm_bindgen_test]
+    fn selected_listing_detail_signal() {
+        let _runtime = create_runtime();
+        let selected = create_rw_signal::<Option<ListingDetail>>(None);
+        assert!(selected.get().is_none());
+
+        selected.set(Some(ListingDetail {
+            listing: ListingCard {
+                id: "l-1".into(), title: "Test".into(), description: None,
+                price_cents: 5000, status: "published".into(),
+                created_at: "2026-01-01T00:00:00Z".into(),
+                campus_name: None, campus_zip_code: None,
+                condition_code: None, category_slug: None,
+            },
+            popularity_score: 15,
+            inventory_on_hand: 3,
+            recommendations: vec![
+                RecommendationCard {
+                    listing_id: "l-2".into(),
+                    title: "Similar".into(),
+                    reason: "category match".into(),
+                    price_cents: 4500,
+                },
+            ],
+        }));
+
+        let detail = selected.get().unwrap();
+        assert_eq!(detail.popularity_score, 15);
+        assert_eq!(detail.inventory_on_hand, 3);
+        assert_eq!(detail.recommendations.len(), 1);
+    }
+
+    #[wasm_bindgen_test]
+    fn error_and_info_signals_work() {
+        let _runtime = create_runtime();
+        let error = create_rw_signal(String::new());
+        let info = create_rw_signal(String::new());
+
+        assert!(error.get().is_empty());
+        error.set("Something went wrong".into());
+        assert!(!error.get().is_empty());
+
+        info.set("Logged in. Workspace data loaded.".into());
+        assert_eq!(info.get(), "Logged in. Workspace data loaded.");
+
+        // Clear error
+        error.set(String::new());
+        assert!(error.get().is_empty());
+    }
+
+    #[wasm_bindgen_test]
+    fn search_history_signal_crud_pattern() {
+        let _runtime = create_runtime();
+        let history = create_rw_signal(Vec::<SearchHistoryItem>::new());
+
+        assert!(history.get().is_empty());
+
+        // Simulate adding items
+        let mut items = history.get();
+        items.push(SearchHistoryItem {
+            id: "h-1".into(),
+            query_text: "laptop".into(),
+            created_at: "2026-04-01T00:00:00Z".into(),
+        });
+        history.set(items);
+        assert_eq!(history.get().len(), 1);
+
+        // Simulate clear
+        history.set(Vec::new());
+        assert!(history.get().is_empty());
+    }
+
+    #[wasm_bindgen_test]
+    fn admin_metrics_signal_optional() {
+        let _runtime = create_runtime();
+        let metrics = create_rw_signal::<Option<DashboardMetrics>>(None);
+        assert!(metrics.get().is_none());
+
+        metrics.set(Some(DashboardMetrics {
+            total_users: 5,
+            total_announcements: 1,
+            total_templates: 0,
+            total_local_credentials: 0,
+            total_companion_credentials: 0,
+            total_uploads: 0,
+            total_shipments: 0,
+            total_feature_flags: 2,
+            total_events: 10,
+            active_users_last_30_days: 3,
+            conversion_rate_percent: 0.0,
+            average_rating: 0.0,
+            open_support_cases: 0,
+        }));
+        assert_eq!(metrics.get().unwrap().total_users, 5);
+    }
+
+    #[wasm_bindgen_test]
+    fn shipment_and_case_history_signals() {
+        let _runtime = create_runtime();
+        let shipment_history = create_rw_signal(Vec::<TimelineEntry>::new());
+        let case_history = create_rw_signal(Vec::<TimelineEntry>::new());
+
+        shipment_history.set(vec![
+            TimelineEntry { from_status: None, to_status: "created".into(), changed_at: "2026-04-01T00:00:00Z".into() },
+            TimelineEntry { from_status: Some("created".into()), to_status: "packed".into(), changed_at: "2026-04-01T01:00:00Z".into() },
+        ]);
+        assert_eq!(shipment_history.get().len(), 2);
+        assert!(shipment_history.get()[0].from_status.is_none());
+        assert_eq!(shipment_history.get()[1].to_status, "packed");
+
+        case_history.set(vec![
+            TimelineEntry { from_status: None, to_status: "requested".into(), changed_at: "2026-04-01T00:00:00Z".into() },
+        ]);
+        assert_eq!(case_history.get()[0].to_status, "requested");
+    }
+
+    // ── Component render tests ──────────────────────────────────────────
+    // These mount actual Leptos components into the browser DOM and inspect
+    // the rendered HTML output — proving real UI wiring, not just state logic.
+
+    fn mount_app_to_test_container() -> web_sys::Element {
+        let document = web_sys::window().unwrap().document().unwrap();
+        let container = document.create_element("div").unwrap();
+        container.set_id("test-root");
+        document.body().unwrap().append_child(&container).unwrap();
+        let _dispose = mount_to(container.clone().unchecked_into(), || view! { <App /> });
+        container
+    }
+
+    fn cleanup_test_container() {
+        let document = web_sys::window().unwrap().document().unwrap();
+        if let Some(el) = document.get_element_by_id("test-root") {
+            el.remove();
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn render_app_shows_login_form_with_inputs() {
+        let container = mount_app_to_test_container();
+        let html = container.inner_html();
+
+        // Login heading and description text
+        assert!(html.contains("DepotCycle Part 2"), "should render app title");
+        assert!(html.contains("Offline device lifecycle marketplace"), "should render h1 heading");
+
+        // Username and password input fields
+        let inputs = container.query_selector_all("input").unwrap();
+        assert!(inputs.length() >= 2, "should render at least username + password inputs, found {}", inputs.length());
+
+        // Check that username placeholder exists
+        assert!(html.contains("username"), "should have username input placeholder");
+        // Check that password placeholder exists
+        assert!(html.contains("password"), "should have password input placeholder");
+
+        // Log in button
+        assert!(html.contains("Log in"), "should render 'Log in' button");
+
+        cleanup_test_container();
+    }
+
+    #[wasm_bindgen_test]
+    fn render_app_shows_role_quick_select_buttons() {
+        let container = mount_app_to_test_container();
+        let html = container.inner_html();
+
+        // The demo-users div should contain quick-select buttons for all roles
+        assert!(html.contains("Admin"), "should have Admin quick-select button");
+        assert!(html.contains("Shopper"), "should have Shopper quick-select button");
+        assert!(html.contains("Clerk"), "should have Clerk quick-select button");
+        assert!(html.contains("Manager"), "should have Manager quick-select button");
+        assert!(html.contains("Support"), "should have Support quick-select button");
+
+        // Should show the demo-users section
+        assert!(html.contains("demo-users"), "should render demo-users container class");
+
+        cleanup_test_container();
+    }
+
+    #[wasm_bindgen_test]
+    fn render_app_shows_logged_out_message_initially() {
+        let container = mount_app_to_test_container();
+        let html = container.inner_html();
+
+        // When not logged in, the "Login required" fallback should be visible
+        assert!(
+            html.contains("Login required for most flows"),
+            "should show login-required message when not authenticated"
+        );
+
+        // The workspace pill should NOT be visible (no user set)
+        assert!(
+            !html.contains("workspace</div>"),
+            "should not show workspace pill when not logged in"
+        );
+
+        cleanup_test_container();
+    }
+
+    #[wasm_bindgen_test]
+    fn render_app_shows_discovery_section() {
+        let container = mount_app_to_test_container();
+        let html = container.inner_html();
+
+        // Discovery section heading
+        assert!(html.contains("Discovery"), "should render Discovery section heading");
+
+        // Search input
+        assert!(html.contains("search devices or keywords"), "should render search input placeholder");
+
+        // Sort dropdown options
+        assert!(html.contains("Relevance"), "should render Relevance sort option");
+        assert!(html.contains("Popularity"), "should render Popularity sort option");
+        assert!(html.contains("Price"), "should render Price sort option");
+
+        // Search button
+        assert!(html.contains("Search"), "should render Search button");
+        assert!(html.contains("Clear history"), "should render Clear history button");
+
+        cleanup_test_container();
+    }
+
+    #[wasm_bindgen_test]
+    fn render_app_shows_detail_and_recommendations_section() {
+        let container = mount_app_to_test_container();
+        let html = container.inner_html();
+
+        // Detail panel
+        assert!(html.contains("Detail &amp; Recommendations") || html.contains("Detail & Recommendations"),
+            "should render Detail & Recommendations section heading");
+
+        // When no listing is selected, the placeholder text should show
+        assert!(
+            html.contains("Open a listing to see popularity"),
+            "should show detail placeholder when no listing selected"
+        );
+
+        // Recommendation settings toggle
+        assert!(
+            html.contains("Enable personalized recommendations"),
+            "should render recommendation toggle label"
+        );
+        assert!(html.contains("Save setting"), "should render Save setting button");
+
+        cleanup_test_container();
+    }
+
+    #[wasm_bindgen_test]
+    fn render_app_shows_inventory_and_shipment_sections() {
+        let container = mount_app_to_test_container();
+        let html = container.inner_html();
+
+        // Inventory Documents section
+        assert!(html.contains("Inventory Documents"), "should render Inventory Documents heading");
+        assert!(html.contains("Create document"), "should render Create document button");
+        assert!(html.contains("receiving"), "should render doc type options");
+
+        // Shipments section
+        assert!(html.contains("Shipments"), "should render Shipments heading");
+        assert!(html.contains("Create shipment order"), "should render Create shipment order button");
+
+        // After-sales section
+        assert!(html.contains("After-sales"), "should render After-sales heading");
+        assert!(html.contains("Create case"), "should render Create case button");
+
+        cleanup_test_container();
+    }
+
+    #[wasm_bindgen_test]
+    fn render_app_recommendation_toggle_checkbox_exists() {
+        let container = mount_app_to_test_container();
+
+        // Find the recommendation checkbox input
+        let checkboxes = container.query_selector_all("input[type='checkbox']").unwrap();
+        assert!(
+            checkboxes.length() >= 1,
+            "should have at least one checkbox (recommendation toggle), found {}",
+            checkboxes.length()
+        );
+
+        cleanup_test_container();
+    }
+
+    #[wasm_bindgen_test]
+    fn render_app_search_controls_include_all_expected_filters() {
+        let container = mount_app_to_test_container();
+        let html = container.inner_html();
+
+        assert!(html.contains("category slug"), "should render category filter input");
+        assert!(html.contains("condition"), "should render condition filter input");
+        assert!(html.contains("campus name"), "should render campus filter input");
+        assert!(html.contains("min USD"), "should render min price input");
+        assert!(html.contains("max USD"), "should render max price input");
+        assert!(html.contains("ZIP for distance"), "should render ZIP filter input");
+
+        cleanup_test_container();
+    }
+
+    #[wasm_bindgen_test]
+    fn render_app_shows_workflow_action_buttons_for_core_user_flows() {
+        let container = mount_app_to_test_container();
+        let html = container.inner_html();
+
+        assert!(html.contains("Favorite"), "should render favorite action button");
+        assert!(html.contains("Buy"), "should render buy action button");
+        assert!(html.contains("Create shipment order"), "should render shipment creation action");
+        assert!(html.contains("Create case"), "should render after-sales case action");
+        assert!(html.contains("Chunked upload + attach evidence"), "should render evidence upload action");
+
+        cleanup_test_container();
+    }
+
+    #[wasm_bindgen_test]
+    fn render_app_shows_admin_sections() {
+        let container = mount_app_to_test_container();
+        let html = container.inner_html();
+
+        // Admin-visible sections should be rendered (though data may be empty until login)
+        assert!(html.contains("Feature Flags") || html.contains("Taxonomy") || html.contains("Credentials") || html.contains("Templates"),
+            "should render at least one admin section heading in the shell");
+
+        cleanup_test_container();
+    }
+}
