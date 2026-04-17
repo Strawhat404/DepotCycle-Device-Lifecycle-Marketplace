@@ -39,8 +39,8 @@ delivery_acceptance_project_architecture_audit.md
 delivery_acceptance_project_architecture_audit.md
 
 # Temp files
-.tmp/
-*.tmp
+
+
 
 # Trajectory and session internals
 trajectory.json
