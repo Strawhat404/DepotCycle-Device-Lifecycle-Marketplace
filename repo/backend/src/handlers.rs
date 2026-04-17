@@ -1788,7 +1788,7 @@ pub async fn list_cohort_assignments(
     let rows = match (query.cohort_id.as_deref(), query.user_id.as_deref()) {
         (Some(cohort_id), Some(user_id)) => {
             sqlx::query_as::<_, CohortAssignmentRecord>(
-                "SELECT id, cohort_id, user_id, assigned_at
+                "SELECT id, cohort_id, user_id, assigned_at AS created_at
                  FROM cohort_assignments
                  WHERE cohort_id = ? AND user_id = ?
                  ORDER BY assigned_at DESC",
@@ -1800,7 +1800,7 @@ pub async fn list_cohort_assignments(
         }
         (Some(cohort_id), None) => {
             sqlx::query_as::<_, CohortAssignmentRecord>(
-                "SELECT id, cohort_id, user_id, assigned_at
+                "SELECT id, cohort_id, user_id, assigned_at AS created_at
                  FROM cohort_assignments
                  WHERE cohort_id = ?
                  ORDER BY assigned_at DESC",
@@ -1811,7 +1811,7 @@ pub async fn list_cohort_assignments(
         }
         (None, Some(user_id)) => {
             sqlx::query_as::<_, CohortAssignmentRecord>(
-                "SELECT id, cohort_id, user_id, assigned_at
+                "SELECT id, cohort_id, user_id, assigned_at AS created_at
                  FROM cohort_assignments
                  WHERE user_id = ?
                  ORDER BY assigned_at DESC",
@@ -1822,7 +1822,7 @@ pub async fn list_cohort_assignments(
         }
         (None, None) => {
             sqlx::query_as::<_, CohortAssignmentRecord>(
-                "SELECT id, cohort_id, user_id, assigned_at
+                "SELECT id, cohort_id, user_id, assigned_at AS created_at
                  FROM cohort_assignments
                  ORDER BY assigned_at DESC",
             )

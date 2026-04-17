@@ -255,7 +255,7 @@ pub struct CohortAssignmentRecord {
     pub id: String,
     pub cohort_id: String,
     pub user_id: String,
-    pub assigned_at: String,
+    pub created_at: String,
 }
 
 #[derive(Deserialize)]
